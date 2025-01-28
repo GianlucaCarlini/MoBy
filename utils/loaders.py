@@ -284,6 +284,111 @@ class PatchDataset(Dataset):
         return [[rel_z], [rel_y], [rel_x]]
 
 
+class SSLPatchDataset(Dataset):
+    def __init__(
+        self,
+        images_dir: str,
+        patch_size: Union[tuple, int] = None,
+        sampling_method: str = "uniform",
+        threshold: float = None,
+        transform: Callable = None,
+        preprocessing: Callable = None,
+        repeat: int = 1,
+        **kwargs,
+    ):
+
+        self.images_dir = images_dir
+        self.ids = os.listdir(self.images_dir)
+
+        if repeat > 1:
+            self.ids = self.ids * repeat
+
+        self.images = [os.path.join(self.images_dir, image_id) for image_id in self.ids]
+
+        if preprocessing is not None:
+            self.preprocessing = preprocessing
+        else:
+            self.preprocessing = None
+
+        if transform is not None:
+            self.transform = transform
+        else:
+            self.transform = None
+
+        self.reader = sitk.ImageFileReader()
+
+        self.sampling_method = sampling_method
+
+        self.sampling_function = sampling_functions.get(self.sampling_method, None)
+
+        if self.sampling_function is None:
+            raise NotImplementedError(
+                f"Sampling method {self.sampling_method} not implemented, available methods are: {sampling_functions.keys()}"
+            )
+
+        if patch_size is not None:
+            if isinstance(patch_size, int):
+                self.patch_size = (patch_size, patch_size, patch_size)
+            else:
+                self.patch_size = patch_size
+        else:
+            self.patch_size = (96, 96, 96)
+
+        if threshold is not None:
+            self.threshold = threshold
+
+        self.len = len(self.ids)
+
+    def __getitem__(self, index):
+        self.reader.SetFileName(self.images[index])
+        self.reader.ReadImageInformation()
+
+        self.x, self.y, self.z = self.reader.GetSize()
+
+        if self.patch_size[0] < 0:
+            patch_size = (self.x, self.y, self.z)
+        else:
+            patch_size = self.patch_size
+
+        while True:
+            (
+                self.extract_idx_x,
+                self.extract_idx_y,
+                self.extract_idx_z,
+            ) = self.sampling_function(
+                volume_size=(self.x, self.y, self.z),
+                patch_size=patch_size,
+                **self.kwargs,
+            )
+
+            self.reader.SetExtractIndex(
+                (self.extract_idx_x, self.extract_idx_y, self.extract_idx_z)
+            )
+            self.reader.SetExtractSize((patch_size[0], patch_size[1], patch_size[2]))
+
+            image = self.reader.Execute()
+            image = sitk.GetArrayFromImage(image)
+
+            if np.sum(np.abs(image) > 0.0) > self.threshold * (
+                patch_size[0] * patch_size[1] * patch_size[2]
+            ):
+                break
+
+        if self.preprocessing is not None:
+            image = self.preprocessing(image)
+
+        image = np.expand_dims(image, axis=0)
+
+        if self.transform is not None:
+            image_1 = self.transform(image)
+            image_2 = self.transform(image)
+
+        image_1 = torch.from_numpy(image_1).float()
+        image_2 = torch.from_numpy(image_2).float()
+
+        return image_1, image_2
+
+
 class ImageDataset(Dataset):
     def __init__(self, image_dir, transform=None, pre_processing=None):
         self.image_dir = image_dir
