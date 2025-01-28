@@ -1,5 +1,4 @@
 import pytorch_lightning as pl
-from monai.networks.nets.swin_unetr import SwinTransformer
 import numpy as np
 from modules.torch_modules import MoBYMLP
 import torch
@@ -58,7 +57,10 @@ class MoBy(pl.LightningModule):
             param_k.data.copy_(param_q.data)
             param_k.requires_grad = False
 
-        self.K = kwargs.get("train_steps", 10000)
+        self.train_steps = kwargs.get("train_steps", 10000)
+        self.initial_lr = kwargs.get("initial_lr", 0.0001)
+
+        self.K = self.train_steps
         self.k = 0
 
         self.register_buffer("queue1", torch.randn(256, self.contrast_num_negatives))
@@ -129,12 +131,16 @@ class MoBy(pl.LightningModule):
 
     def forward(self, x1, x2):
 
-        feat_1 = self.encoder(x1)[4]
+        feat_1 = self.encoder(x1)
+        if isinstance(feat_1, list):
+            feat_1 = feat_1[4]
         proj_1 = self.projector(feat_1)
         pred_1 = self.predictor(proj_1)
         pred_1 = nn.functional.normalize(pred_1, dim=1)
 
-        feat_2 = self.encoder_k(x2)[4]
+        feat_2 = self.encoder_k(x2)
+        if isinstance(feat_2, list):
+            feat_2 = feat_2[4]
         proj_2 = self.projector_k(feat_2)
         pred_2 = self.predictor(proj_2)
         pred_2 = nn.functional.normalize(pred_2, dim=1)
@@ -154,3 +160,45 @@ class MoBy(pl.LightningModule):
         self._dequeue_and_enqueue(proj_1_k, proj_2_k)
 
         return pred_1, pred_2, proj_1_k, proj_2_k
+
+    def training_step(self, batch, batch_idx):
+        x1, x2 = batch
+
+        x1 = self.corrupt(x1)
+        x2 = self.corrupt(x2)
+
+        pred_1, pred_2, proj_1_k, proj_2_k = self(x1, x2)
+
+        loss = self.contrastive_loss(
+            pred_1, proj_2_k, self.queue2
+        ) + self.contrastive_loss(pred_2, proj_1_k, self.queue1)
+
+        self.log("train_loss", loss)
+
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        x1, x2 = batch
+
+        x1 = self.corrupt(x1)
+        x2 = self.corrupt(x2)
+
+        pred_1, pred_2, proj_1_k, proj_2_k = self(x1, x2)
+
+        loss = self.contrastive_loss(
+            pred_1, proj_2_k, self.queue2
+        ) + self.contrastive_loss(pred_2, proj_1_k, self.queue1)
+
+        self.log("val_loss", loss)
+
+        return loss
+
+    def configure_optimizers(self):
+        optimizer = self.optimizer(self.parameters(), lr=self.initial_lr)
+        scheduler = self.scheduler(
+            optimizer,
+            num_warmup_steps=self.train_steps * 0.01,
+            num_training_steps=self.train_steps,
+        )
+
+        return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
