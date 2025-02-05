@@ -14,6 +14,7 @@ class MoBy(pl.LightningModule):
         scheduler,
         corrupt,
         contrast_temperature=0.2,
+        projector=True,
         contrast_momentum=0.99,
         contrast_num_negatives=4096,
         proj_num_layers=2,
@@ -41,17 +42,24 @@ class MoBy(pl.LightningModule):
         self.pred_num_layers = pred_num_layers
         self.kwargs = kwargs
 
+        self.projector = projector
+
         try:
-            out_dim = self.encoder.embed_dim * 2 ** (len(self.encoder.depths) - 1)
+            out_dim = self.encoder.embed_dim * 2 ** (self.encoder.num_layers)
         except AttributeError:
             out_dim = self.encoder.config.embed_dim * 2 ** (
                 len(self.encoder.config.depths) - 1
             )
 
-        self.projector = MoBYMLP(in_dim=out_dim, num_layers=self.proj_num_layers)
-        self.projector_k = MoBYMLP(in_dim=out_dim, num_layers=self.proj_num_layers)
+        if self.projector is False:
+            self.channels = out_dim
+            pass
+        else:
+            self.projector = MoBYMLP(in_dim=out_dim, num_layers=self.proj_num_layers)
+            self.projector_k = MoBYMLP(in_dim=out_dim, num_layers=self.proj_num_layers)
 
-        self.predictor = MoBYMLP(num_layers=self.pred_num_layers)
+            self.predictor = MoBYMLP(num_layers=self.pred_num_layers)
+            self.channels = self.projector.out_dim
 
         for param_q, param_k in zip(
             self.encoder.parameters(), self.encoder_k.parameters()
@@ -59,11 +67,12 @@ class MoBy(pl.LightningModule):
             param_k.data.copy_(param_q.data)
             param_k.requires_grad = False
 
-        for param_q, param_k in zip(
-            self.projector.parameters(), self.projector_k.parameters()
-        ):
-            param_k.data.copy_(param_q.data)
-            param_k.requires_grad = False
+        if self.projector:
+            for param_q, param_k in zip(
+                self.projector.parameters(), self.projector_k.parameters()
+            ):
+                param_k.data.copy_(param_q.data)
+                param_k.requires_grad = False
 
         self.train_steps = kwargs.get("train_steps", 10000)
         self.initial_lr = kwargs.get("initial_lr", 0.0001)
@@ -71,8 +80,12 @@ class MoBy(pl.LightningModule):
         self.K = self.train_steps
         self.k = 0
 
-        self.register_buffer("queue1", torch.randn(256, self.contrast_num_negatives))
-        self.register_buffer("queue2", torch.randn(256, self.contrast_num_negatives))
+        self.register_buffer(
+            "queue1", torch.randn(self.channels, self.contrast_num_negatives)
+        )
+        self.register_buffer(
+            "queue2", torch.randn(self.channels, self.contrast_num_negatives)
+        )
 
         self.queue1 = nn.functional.normalize(self.queue1, dim=0)
         self.queue2 = nn.functional.normalize(self.queue2, dim=0)
@@ -98,12 +111,13 @@ class MoBy(pl.LightningModule):
                 1.0 - _contrast_momentum
             )
 
-        for param_q, param_k in zip(
-            self.projector.parameters(), self.projector_k.parameters()
-        ):
-            param_k.data = param_k.data * _contrast_momentum + param_q.data * (
-                1.0 - _contrast_momentum
-            )
+        if self.projector:
+            for param_q, param_k in zip(
+                self.projector.parameters(), self.projector_k.parameters()
+            ):
+                param_k.data = param_k.data * _contrast_momentum + param_q.data * (
+                    1.0 - _contrast_momentum
+                )
 
     @torch.no_grad()
     def _dequeue_and_enqueue(self, keys1, keys2):
@@ -144,22 +158,32 @@ class MoBy(pl.LightningModule):
         feat_1 = self.encoder(x1)
         if isinstance(feat_1, list):
             feat_1 = feat_1[4]
+            feat_1 = torch.mean(feat_1, dim=(2, 3, 4))
         else:
             feat_1 = feat_1.last_hidden_state
-        feat_1 = torch.mean(feat_1, dim=1)
-        proj_1 = self.projector(feat_1)
-        pred_1 = self.predictor(proj_1)
-        pred_1 = nn.functional.normalize(pred_1, dim=1)
+            feat_1 = torch.mean(feat_1, dim=1)
+
+        if self.projector is False:
+            pred_1 = nn.functional.normalize(feat_1, dim=1)
+        else:
+            proj_1 = self.projector(feat_1)
+            pred_1 = self.predictor(proj_1)
+            pred_1 = nn.functional.normalize(pred_1, dim=1)
 
         feat_2 = self.encoder(x2)
         if isinstance(feat_2, list):
             feat_2 = feat_2[4]
+            feat_2 = torch.mean(feat_2, dim=(2, 3, 4))
         else:
             feat_2 = feat_2.last_hidden_state
-        feat_2 = torch.mean(feat_2, dim=1)
-        proj_2 = self.projector(feat_2)
-        pred_2 = self.predictor(proj_2)
-        pred_2 = nn.functional.normalize(pred_2, dim=1)
+            feat_2 = torch.mean(feat_2, dim=1)
+
+        if self.projector is False:
+            pred_2 = nn.functional.normalize(feat_2, dim=1)
+        else:
+            proj_2 = self.projector(feat_2)
+            pred_2 = self.predictor(proj_2)
+            pred_2 = nn.functional.normalize(pred_2, dim=1)
 
         # computer key features
         with torch.no_grad():
@@ -168,20 +192,30 @@ class MoBy(pl.LightningModule):
             feat_1_k = self.encoder_k(x1)
             if isinstance(feat_1_k, list):
                 feat_1_k = feat_1_k[4]
+                feat_1_k = torch.mean(feat_1_k, dim=(2, 3, 4))
             else:
                 feat_1_k = feat_1_k.last_hidden_state
-            feat_1_k = torch.mean(feat_1_k, dim=1)
-            proj_1_k = self.projector_k(feat_1_k)
-            proj_1_k = nn.functional.normalize(proj_1_k, dim=1)
+                feat_1_k = torch.mean(feat_1_k, dim=1)
+
+            if self.projector is False:
+                proj_1_k = nn.functional.normalize(feat_1_k, dim=1)
+            else:
+                proj_1_k = self.projector_k(feat_1_k)
+                proj_1_k = nn.functional.normalize(proj_1_k, dim=1)
 
             feat_2_k = self.encoder_k(x2)
             if isinstance(feat_2_k, list):
                 feat_2_k = feat_2_k[4]
+                feat_2_k = torch.mean(feat_2_k, dim=(2, 3, 4))
             else:
                 feat_2_k = feat_2_k.last_hidden_state
-            feat_2_k = torch.mean(feat_2_k, dim=1)
-            proj_2_k = self.projector_k(feat_2_k)
-            proj_2_k = nn.functional.normalize(proj_2_k, dim=1)
+                feat_2_k = torch.mean(feat_2_k, dim=1)
+
+            if self.projector is False:
+                proj_2_k = nn.functional.normalize(feat_2_k, dim=1)
+            else:
+                proj_2_k = self.projector_k(feat_2_k)
+                proj_2_k = nn.functional.normalize(proj_2_k, dim=1)
 
         return pred_1, pred_2, proj_1_k, proj_2_k
 

@@ -9,7 +9,7 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 import PIL
 
-__all__ = ["PatchDataset", "ImageDataset"]
+__all__ = ["PatchDataset", "ImageDataset", "SSLPatchDataset", "SSLImageDataset"]
 
 
 def gaussian_sampling(volume_size: tuple, patch_size: tuple, std_factor: int = 8):
@@ -339,6 +339,7 @@ class SSLPatchDataset(Dataset):
             self.threshold = threshold
 
         self.len = len(self.ids)
+        self.kwargs = kwargs
 
     def __getitem__(self, index):
         self.reader.SetFileName(self.images[index])
@@ -375,19 +376,25 @@ class SSLPatchDataset(Dataset):
             ):
                 break
 
+        image = np.expand_dims(image, axis=0)
+
         if self.preprocessing is not None:
             image = self.preprocessing(image)
-
-        image = np.expand_dims(image, axis=0)
 
         if self.transform is not None:
             image_1 = self.transform(image)
             image_2 = self.transform(image)
+        else:
+            image_1 = image.copy()
+            image_2 = image.copy()
 
         image_1 = torch.from_numpy(image_1).float()
         image_2 = torch.from_numpy(image_2).float()
 
         return image_1, image_2
+
+    def __len__(self):
+        return self.len
 
 
 class SSLImageDataset(Dataset):

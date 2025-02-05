@@ -1,0 +1,112 @@
+lightning_model:
+  encoder:
+    target: monai.networks.nets.swin_unetr.SwinTransformer
+    params:
+      spatial_dims: 3
+      in_chans: 1
+      embed_dim: 48
+      window_size:
+        - 8
+        - 8
+        - 8
+      depths:
+        - 2
+        - 2
+        - 2
+        - 2
+      drop_path_rate: 0.1 
+      patch_size: 4 
+      num_heads:
+        - 3
+        - 6
+        - 12
+        - 24
+  encoder_k:
+    target: monai.networks.nets.swin_unetr.SwinTransformer
+    params:
+      spatial_dims: 3
+      in_chans: 1
+      embed_dim: 48
+      window_size:
+        - 8
+        - 8
+        - 8
+      depths:
+        - 2
+        - 2
+        - 2
+        - 2
+      drop_path_rate: 0.1 
+      patch_size: 4 
+      num_heads:
+        - 3
+        - 6
+        - 12
+        - 24
+  corrupt:
+    target: utils.ssl_ops.CorruptImage
+    params:
+      patch_size: 32
+      frac: 0.3
+      mode: "disc"
+      return_proportion: False
+  optimizer:
+    target: torch.optim.AdamW
+  scheduler:
+    target: transformers.get_cosine_schedule_with_warmup
+  params:
+    initial_lr: 5e-5
+    contrast_num_negatives: 128
+    projector: False
+
+trainer:
+  callbacks:
+    target:
+      early_stopping: pytorch_lightning.callbacks.EarlyStopping
+      model_checkpoint: pytorch_lightning.callbacks.ModelCheckpoint
+      lr_monitor: pytorch_lightning.callbacks.LearningRateMonitor
+    params:
+      early_stopping:
+        monitor: "train_loss"
+        min_delta: 1e-4
+        patience: 20
+        verbose: True
+        mode: "min"
+      model_checkpoint:
+        dirpath: "pt_models/"
+        filename: "best_moby_3d"
+        monitor: "train_loss"
+        mode: "min"
+        save_top_k: 1
+      lr_monitor:
+        logging_interval: "step"
+  params:
+    max_epochs: 100
+    accelerator: "gpu"
+    check_val_every_n_epoch: 1
+    log_every_n_steps: 1
+    precision: "16-mixed"
+
+train_dataset:
+  params:
+    images_dir: "/mnt/c/Users/Carlini/Desktop/Gianluca/QSM_GV_GC/imgs"
+    patch_size: 128
+    threshold: 0.0
+
+train_dataloader:
+  params:
+    batch_size: 8
+    shuffle: True
+    num_workers: 24
+
+val_dataset:
+  params:
+    images_dir: "/mnt/c/Users/Carlini/Desktop/Gianluca/QSM_GV_GC/splits_resampled/test"
+    patch_size: -1
+    threshold: 0.0
+
+val_dataloader:
+  params:
+    batch_size: 4
+    shuffle: True
+    num_workers: 24
