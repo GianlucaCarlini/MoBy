@@ -13,8 +13,8 @@ class MoBy(pl.LightningModule):
         optimizer,
         scheduler,
         corrupt,
-        contrast_momentum=0.99,
         contrast_temperature=0.2,
+        contrast_momentum=0.99,
         contrast_num_negatives=4096,
         proj_num_layers=2,
         pred_num_layers=2,
@@ -28,7 +28,10 @@ class MoBy(pl.LightningModule):
         self.optimizer = optimizer
         self.scheduler = scheduler
 
-        self.corrupt = corrupt
+        if corrupt is None:
+            self.corrupt = corrupt
+        else:
+            self.corrupt = None
 
         self.contrast_momentum = contrast_momentum
         self.contrast_temperature = contrast_temperature
@@ -38,7 +41,12 @@ class MoBy(pl.LightningModule):
         self.pred_num_layers = pred_num_layers
         self.kwargs = kwargs
 
-        out_dim = self.encoder.embed_dim * 2 ** (len(self.encoder.depths) - 1)
+        try:
+            out_dim = self.encoder.embed_dim * 2 ** (len(self.encoder.depths) - 1)
+        except AttributeError:
+            out_dim = self.encoder.config.embed_dim * 2 ** (
+                len(self.encoder.config.depths) - 1
+            )
 
         self.projector = MoBYMLP(in_dim=out_dim, num_layers=self.proj_num_layers)
         self.projector_k = MoBYMLP(in_dim=out_dim, num_layers=self.proj_num_layers)
@@ -76,10 +84,12 @@ class MoBy(pl.LightningModule):
 
         _contrast_momentum = (
             1.0
-            - (1.0 - self.contrast_momentum) * (np.cos(np.pi * self.k / self.K) + 1) / 2
+            - (1.0 - self.contrast_momentum)
+            * (np.cos(np.pi * self.k / self.K) + 1)
+            / 2.0
         )
 
-        self.k += 1
+        self.k = self.k + 1
 
         for param_q, param_k in zip(
             self.encoder.parameters(), self.encoder_k.parameters()
@@ -134,14 +144,20 @@ class MoBy(pl.LightningModule):
         feat_1 = self.encoder(x1)
         if isinstance(feat_1, list):
             feat_1 = feat_1[4]
+        else:
+            feat_1 = feat_1.last_hidden_state
+        feat_1 = torch.mean(feat_1, dim=1)
         proj_1 = self.projector(feat_1)
         pred_1 = self.predictor(proj_1)
         pred_1 = nn.functional.normalize(pred_1, dim=1)
 
-        feat_2 = self.encoder_k(x2)
+        feat_2 = self.encoder(x2)
         if isinstance(feat_2, list):
             feat_2 = feat_2[4]
-        proj_2 = self.projector_k(feat_2)
+        else:
+            feat_2 = feat_2.last_hidden_state
+        feat_2 = torch.mean(feat_2, dim=1)
+        proj_2 = self.projector(feat_2)
         pred_2 = self.predictor(proj_2)
         pred_2 = nn.functional.normalize(pred_2, dim=1)
 
@@ -149,23 +165,32 @@ class MoBy(pl.LightningModule):
         with torch.no_grad():
             self._momentum_update_key_encoder()
 
-            feat_1_k = self.encoder_k(x1)[4]
+            feat_1_k = self.encoder_k(x1)
+            if isinstance(feat_1_k, list):
+                feat_1_k = feat_1_k[4]
+            else:
+                feat_1_k = feat_1_k.last_hidden_state
+            feat_1_k = torch.mean(feat_1_k, dim=1)
             proj_1_k = self.projector_k(feat_1_k)
             proj_1_k = nn.functional.normalize(proj_1_k, dim=1)
 
-            feat_2_k = self.encoder(x2)[4]
-            proj_2_k = self.projector(feat_2_k)
+            feat_2_k = self.encoder_k(x2)
+            if isinstance(feat_2_k, list):
+                feat_2_k = feat_2_k[4]
+            else:
+                feat_2_k = feat_2_k.last_hidden_state
+            feat_2_k = torch.mean(feat_2_k, dim=1)
+            proj_2_k = self.projector_k(feat_2_k)
             proj_2_k = nn.functional.normalize(proj_2_k, dim=1)
-
-        self._dequeue_and_enqueue(proj_1_k, proj_2_k)
 
         return pred_1, pred_2, proj_1_k, proj_2_k
 
     def training_step(self, batch, batch_idx):
         x1, x2 = batch
 
-        x1 = self.corrupt(x1)
-        x2 = self.corrupt(x2)
+        if self.corrupt is not None:
+            x1, _ = self.corrupt(x1)
+            x2, _ = self.corrupt(x2)
 
         pred_1, pred_2, proj_1_k, proj_2_k = self(x1, x2)
 
@@ -173,15 +198,20 @@ class MoBy(pl.LightningModule):
             pred_1, proj_2_k, self.queue2
         ) + self.contrastive_loss(pred_2, proj_1_k, self.queue1)
 
-        self.log("train_loss", loss)
+        self._dequeue_and_enqueue(proj_1_k, proj_2_k)
+
+        self.log(
+            "train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True
+        )
 
         return loss
 
     def validation_step(self, batch, batch_idx):
         x1, x2 = batch
 
-        x1 = self.corrupt(x1)
-        x2 = self.corrupt(x2)
+        if self.corrupt is not None:
+            x1, _ = self.corrupt(x1)
+            # x2, _ = self.corrupt(x2)
 
         pred_1, pred_2, proj_1_k, proj_2_k = self(x1, x2)
 
@@ -189,7 +219,9 @@ class MoBy(pl.LightningModule):
             pred_1, proj_2_k, self.queue2
         ) + self.contrastive_loss(pred_2, proj_1_k, self.queue1)
 
-        self.log("val_loss", loss)
+        self.log(
+            "val_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True
+        )
 
         return loss
 
@@ -197,7 +229,7 @@ class MoBy(pl.LightningModule):
         optimizer = self.optimizer(self.parameters(), lr=self.initial_lr)
         scheduler = self.scheduler(
             optimizer,
-            num_warmup_steps=self.train_steps * 0.01,
+            num_warmup_steps=self.train_steps * 0.0,
             num_training_steps=self.train_steps,
         )
 

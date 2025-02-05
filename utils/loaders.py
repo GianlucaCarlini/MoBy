@@ -7,6 +7,7 @@ from typing import Union, Callable, Any
 import os
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
+import PIL
 
 __all__ = ["PatchDataset", "ImageDataset"]
 
@@ -389,7 +390,7 @@ class SSLPatchDataset(Dataset):
         return image_1, image_2
 
 
-class ImageDataset(Dataset):
+class SSLImageDataset(Dataset):
     def __init__(self, image_dir, transform=None, pre_processing=None):
         self.image_dir = image_dir
         self.transform = transform
@@ -412,6 +413,7 @@ class ImageDataset(Dataset):
             image = self.pre_processing(image)
 
         if self.transform:
-            image = self.transform(image)
+            image_1 = self.transform(image)
+            image_2 = self.transform(image)
 
-        return image
+        return image_1, image_2

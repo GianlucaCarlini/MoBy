@@ -9,7 +9,7 @@ def corrupt_image(
     patch_size: int = 32,
     frac: float = 0.2,
     mode: str = "disc",
-    retrun_proportion: bool = False,
+    return_proportion: bool = False,
 ) -> torch.Tensor:
     """
     corrupt an image by modifying patches of a given size.
@@ -32,7 +32,7 @@ def corrupt_image(
         Mode of corruption, either "disc" or "mask", by default "disc".
         If "disc", the patches will be shuffled. If "mask", the patches will be zeroed-out.
         Disc is short for discombobulate, which is a fun word.
-    retrun_proportion : bool, optional
+    return_proportion : bool, optional
         If True, the proportion of patches that were shuffled will be returned.
         More in detail, it will return a matrix nxn where n is the number of images in the batch.
         The (i, j) element of the matrix represents the proportion of patches of the image j
@@ -101,13 +101,20 @@ def corrupt_image(
 
     n_patches = patches.shape[1] // image.shape[0]
 
+    # check if a patch is shuffled to the same position
+    diff = shuffled_idxs - _shuffle_idxs
+    same = np.where(diff == 0)[0]
+    list_same = shuffled_idxs[same]
+
+    rand_patch = torch.randn(1, first_dim_size, patch_size, patch_size).to(image.device)
+
     # TODO: probably this can be made more efficient
     # like: patches[:, shuffled_idxs, ...] = patches[:, _shuffle_idxs, ...]
     # I'll test it later
     if mode == "disc":
         patches[:, shuffled_idxs, ...] = patches[:, _shuffle_idxs, ...]
     elif mode == "mask":
-        patches[:, _shuffle_idxs, ...] = 0
+        patches[:, shuffled_idxs, ...] = rand_patch
     else:
         raise ValueError('Mode should be either "disc" or "mask"')
 
@@ -115,10 +122,24 @@ def corrupt_image(
     corrupted = corrupted.permute(0, 1, 4, 2, 5, 3, 6).contiguous()
     corrupted = corrupted.view(image.shape)
 
+    img_idxs = torch.ones(
+        size=(patches.shape[0], patches.shape[1], 1, 1, 1), device=image.device
+    )
+    img_idxs[:, shuffled_idxs, ...] = 0
+    # if it was shuffled to the same position, set the index to 1
+    img_idxs[:, list_same, ...] = 1
+    img_idxs = img_idxs.view(unfold_shape[:-3])
+    img_idxs = img_idxs.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+    img_idxs = img_idxs.permute(0, 1, 4, 2, 5, 3, 6).contiguous()
+    img_idxs = img_idxs.view(
+        image.shape[0], image.shape[2] // patch_size, image.shape[3] // patch_size
+    )
+    img_idxs = img_idxs.unsqueeze(1)
+
     if image_ndim == 5:
         corrupted = corrupted.unsqueeze(1)  # add channel dimension back
 
-    if retrun_proportion and mode == "disc":
+    if return_proportion and mode == "disc":
         # create a vector associating each patch with its image
         pos = torch.arange(image.shape[0])
 
@@ -170,7 +191,7 @@ def corrupt_image(
 
         return corrupted, unique
 
-    return corrupted
+    return corrupted, img_idxs
 
 
 class CorruptImage(nn.Module):
